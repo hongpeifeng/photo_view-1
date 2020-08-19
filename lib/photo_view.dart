@@ -235,31 +235,32 @@ class PhotoView extends StatefulWidget {
   /// image providers, ie: [AssetImage] or [NetworkImage]
   ///
   /// Internally, the image is rendered within an [Image] widget.
-  PhotoView({
-    Key key,
-    @required this.imageProvider,
-    this.loadingBuilder,
-    this.loadFailedChild,
-    this.backgroundDecoration,
-    this.gaplessPlayback = false,
-    this.heroAttributes,
-    this.scaleStateChangedCallback,
-    this.enableRotation = false,
-    this.controller,
-    this.scaleStateController,
-    this.maxScale,
-    this.minScale,
-    this.initialScale,
-    this.basePosition,
-    this.scaleStateCycle,
-    this.onTapUp,
-    this.onTapDown,
-    this.customSize,
-    this.gestureDetectorBehavior,
-    this.tightMode,
-    this.filterQuality,
-    this.disableGestures,
-  })  : child = null,
+  PhotoView(
+      {Key key,
+      @required this.imageProvider,
+      this.loadingBuilder,
+      this.loadFailedChild,
+      this.backgroundDecoration,
+      this.gaplessPlayback = false,
+      this.heroAttributes,
+      this.scaleStateChangedCallback,
+      this.enableRotation = false,
+      this.controller,
+      this.scaleStateController,
+      this.maxScale,
+      this.minScale,
+      this.initialScale,
+      this.basePosition,
+      this.scaleStateCycle,
+      this.onTapUp,
+      this.onTapDown,
+      this.customSize,
+      this.gestureDetectorBehavior,
+      this.tightMode,
+      this.filterQuality,
+      this.disableGestures,
+      this.errorBuilder})
+      : child = null,
         childSize = null,
         super(key: key);
 
@@ -292,6 +293,7 @@ class PhotoView extends StatefulWidget {
     this.filterQuality,
     this.disableGestures,
   })  : loadFailedChild = null,
+        errorBuilder = null,
         imageProvider = null,
         gaplessPlayback = false,
         loadingBuilder = null,
@@ -306,6 +308,10 @@ class PhotoView extends StatefulWidget {
   final LoadingBuilder loadingBuilder;
 
   /// Show loadFailedChild when the image failed to load
+  final ImageErrorWidgetBuilder errorBuilder;
+
+  /// Show loadFailedChild when the image failed to load
+  @Deprecated("Use errorBuilder instead")
   final Widget loadFailedChild;
 
   /// Changes the background behind image, defaults to `Colors.black`.
@@ -392,67 +398,78 @@ class PhotoView extends StatefulWidget {
 }
 
 class _PhotoViewState extends State<PhotoView> {
-  Size _childSize;
-  bool _loading;
+  // image retrieval
+  ImageStreamListener _imageStreamListener;
+  ImageStream _stream;
   ImageChunkEvent _imageChunkEvent;
+  ImageInfo _imageInfo;
+  bool _loading = true;
+  Size _imageSize;
+  Object _lastException;
+  StackTrace _stackTrace;
 
+  // controller
   bool _controlledController;
   PhotoViewControllerBase _controller;
-
   bool _controlledScaleStateController;
   PhotoViewScaleStateController _scaleStateController;
 
-  Future<ImageInfo> _getImage() {
-    final Completer completer = Completer<ImageInfo>();
-    final ImageStream stream = widget.imageProvider.resolve(
+  bool get isCustomChild {
+    return widget.child != null;
+  }
+
+  // retrieve image from the provider
+  void _getImage() {
+    _stream = widget.imageProvider.resolve(
       const ImageConfiguration(),
     );
-    final listener = ImageStreamListener((
-      ImageInfo info,
-      bool synchronousCall,
-    ) {
-      if (completer.isCompleted) {
-        return;
-      }
-      completer.complete(info);
-      if (mounted) {
-        final setupCallback = () {
-          _childSize = Size(
-            info.image.width.toDouble(),
-            info.image.height.toDouble(),
-          );
-          _loading = false;
-          _imageChunkEvent = null;
-        };
-        synchronousCall ? setupCallback() : setState(setupCallback);
-      }
-    }, onChunk: (event) {
-      if (mounted) {
-        setState(() => _imageChunkEvent = event);
-      }
-    }, onError: (exception, stackTrace) {
-      if (completer.isCompleted) {
-        return;
-      }
-      completer.completeError(exception, stackTrace);
-    });
-    stream.addListener(listener);
-    completer.future.then((_) {
-      stream.removeListener(listener);
-    });
-    return completer.future;
+
+    void handleImageChunk(ImageChunkEvent event) {
+      assert(widget.loadingBuilder != null);
+      setState(() => _imageChunkEvent = event);
+    }
+
+    void handleImageFrame(ImageInfo info, bool synchronousCall) {
+      final setupCB = () {
+        _imageSize = Size(
+          info.image.width.toDouble(),
+          info.image.height.toDouble(),
+        );
+        _loading = false;
+        _imageInfo = _imageInfo;
+
+        _imageChunkEvent = null;
+        _lastException = null;
+        _stackTrace = null;
+      };
+      synchronousCall ? setupCB() : setState(setupCB);
+    }
+
+    void handleError(dynamic error, StackTrace stackTrace) {
+      setState(() {
+        _lastException = error;
+        _stackTrace = stackTrace;
+      });
+    }
+
+    _imageStreamListener = ImageStreamListener(
+      handleImageFrame,
+      onChunk: handleImageChunk,
+      onError: handleError,
+    );
+    _stream.addListener(_imageStreamListener);
   }
 
   @override
   void initState() {
     super.initState();
-    if (widget.child == null) {
+    if (!isCustomChild) {
       _getImage();
     } else {
-      _childSize = widget.childSize;
       _loading = false;
       _imageChunkEvent = null;
     }
+
     if (widget.controller == null) {
       _controlledController = true;
       _controller = PhotoViewController();
@@ -474,11 +491,6 @@ class _PhotoViewState extends State<PhotoView> {
 
   @override
   void didUpdateWidget(PhotoView oldWidget) {
-    if (oldWidget.childSize != widget.childSize && widget.childSize != null) {
-      setState(() {
-        _childSize = widget.childSize;
-      });
-    }
     if (widget.controller == null) {
       if (!_controlledController) {
         _controlledController = true;
@@ -503,6 +515,7 @@ class _PhotoViewState extends State<PhotoView> {
 
   @override
   void dispose() {
+    _stream.removeListener(_imageStreamListener);
     if (_controlledController) {
       _controller.dispose();
     }
@@ -540,7 +553,7 @@ class _PhotoViewState extends State<PhotoView> {
       widget.maxScale ?? double.infinity,
       widget.initialScale ?? PhotoViewComputedScale.contained,
       _computedOuterSize,
-      _childSize ?? constraints.biggest,
+      widget.childSize ?? constraints.biggest,
     );
 
     return PhotoViewCore.customChild(
@@ -563,33 +576,14 @@ class _PhotoViewState extends State<PhotoView> {
   }
 
   Widget _buildImage(BuildContext context, BoxConstraints constraints) {
-    return widget.heroAttributes == null
-        ? _buildAsync(context, constraints)
-        : _buildSync(context, constraints);
-  }
-
-  Widget _buildAsync(BuildContext context, BoxConstraints constraints) {
-    return FutureBuilder(
-        future: _getImage(),
-        builder: (BuildContext context, AsyncSnapshot<ImageInfo> info) {
-          if (info.hasError) {
-            return _buildLoadFailed();
-          }
-          if (info.hasData) {
-            return _buildWrapperImage(context, constraints);
-          }
-          return _buildLoading();
-        });
-  }
-
-  Widget _buildSync(BuildContext context, BoxConstraints constraints) {
-    if (_loading == null) {
-      return _buildLoading();
+    if (_loading) {
+      return _buildLoading(context);
     }
-    return _buildWrapperImage(context, constraints);
-  }
 
-  Widget _buildWrapperImage(BuildContext context, BoxConstraints constraints) {
+    if(_lastException) {
+      return _buildLoadFailed(context);
+    }
+
     final _computedOuterSize = widget.customSize ?? constraints.biggest;
 
     final scaleBoundaries = ScaleBoundaries(
@@ -597,7 +591,7 @@ class _PhotoViewState extends State<PhotoView> {
       widget.maxScale ?? double.infinity,
       widget.initialScale ?? PhotoViewComputedScale.contained,
       _computedOuterSize,
-      _childSize,
+      _imageSize,
     );
 
     return PhotoViewCore(
@@ -620,7 +614,7 @@ class _PhotoViewState extends State<PhotoView> {
     );
   }
 
-  Widget _buildLoading() {
+  Widget _buildLoading(BuildContext context) {
     if (widget.loadingBuilder != null) {
       return widget.loadingBuilder(context, _imageChunkEvent);
     }
@@ -630,8 +624,16 @@ class _PhotoViewState extends State<PhotoView> {
     );
   }
 
-  Widget _buildLoadFailed() {
-    return widget.loadFailedChild ?? PhotoViewDefaultError();
+  Widget _buildLoadFailed(
+    BuildContext context,
+  ) {
+    if (widget.loadFailedChild != null) {
+      return widget.loadFailedChild;
+    }
+    if (widget.errorBuilder != null) {
+      return widget.errorBuilder(context, _lastException, _stackTrace);
+    }
+    return PhotoViewDefaultError();
   }
 }
 
@@ -673,7 +675,7 @@ typedef PhotoViewImageTapDownCallback = Function(
   PhotoViewControllerValue controllerValue,
 );
 
-/// A type definition for a callback to show a widget while a image is loading, a [ImageChunkEvent] is passed to inform progress
+/// A type definition for a callback to show a widget while the image is loading, a [ImageChunkEvent] is passed to inform progress
 typedef LoadingBuilder = Widget Function(
   BuildContext context,
   ImageChunkEvent event,
